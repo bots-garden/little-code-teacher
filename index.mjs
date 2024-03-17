@@ -5,9 +5,9 @@ import fastifyStatic from '@fastify/static'
 import { ChatOllama } from "@langchain/community/chat_models/ollama"
 import { StringOutputParser } from "@langchain/core/output_parsers"
 
-import { RunnableWithMessageHistory } from "@langchain/core/runnables" // 👋
-import { ChatMessageHistory } from "langchain/stores/message/in_memory" // 👋
+import { RunnableWithMessageHistory } from "@langchain/core/runnables"
 
+import { ConversationSummaryMemory } from "langchain/memory"
 
 import { 
   SystemMessagePromptTemplate, 
@@ -17,14 +17,22 @@ import {
 } from "@langchain/core/prompts"
 
 let ollama_base_url = process.env.OLLAMA_BASE_URL
+let llm_name = process.env.LLM
 
 const model = new ChatOllama({
   baseUrl: ollama_base_url,
-  model: "deepseek-coder", 
+  model: llm_name, 
   temperature: 0,
   repeatPenalty: 1,
-  verbose: true
+  verbose: true,
 })
+
+const memory = new ConversationSummaryMemory({
+  memoryKey: "history",
+  llm: model,
+})
+
+var controller = new AbortController()
 
 const prompt = ChatPromptTemplate.fromMessages([
   SystemMessagePromptTemplate.fromTemplate(
@@ -33,15 +41,13 @@ const prompt = ChatPromptTemplate.fromMessages([
      Add source code examples if you can.
     `
   ),
-  new MessagesPlaceholder("history"), // 👋
+  new MessagesPlaceholder("history"),
   HumanMessagePromptTemplate.fromTemplate(
     `I need a clear explanation regarding my {question}.
      And, please, be structured with bullet points.
     `
   )
 ])
-
-const messageHistory = new ChatMessageHistory() // 👋
 
 const fastify = Fastify({
   logger: true
@@ -54,35 +60,47 @@ fastify.register(fastifyStatic, {
 
 const { ADDRESS = '0.0.0.0', PORT = '8080' } = process.env;
 
-/*
-var messageHistory = new ChatMessageHistory() // 👋
-
 fastify.delete('/clear-history', async (request, reply) => {
-  messageHistory = new ChatMessageHistory()
+  console.log("👋 clear conversation summary")
+  memory.clear()
+  return "👋 conversation summary is empty"
 })
-*/
 
+fastify.get('/message-history', async (request, reply) => {
+  return memory.chatHistory.getMessages()
+})
+
+fastify.delete('/cancel-request', async (request, reply) => {
+  console.log("👋 cancel request")
+  controller.abort()
+  // recreate the abort controller
+  var controller = new AbortController()
+  return "👋 request aborted"
+})
 
 fastify.post('/prompt', async (request, reply) => {
   const question = request.body["question"]
 
   const outputParser = new StringOutputParser()
 
-  const chain = prompt.pipe(model).pipe(outputParser)
+  model.bind({ signal: controller.signal })
 
-  const chainWithHistory = new RunnableWithMessageHistory({ // 👋
+  const chain = prompt.pipe(model).pipe(outputParser)
+  
+  const chainWithHistory = new RunnableWithMessageHistory({
     runnable: chain,
-    getMessageHistory: (_sessionId) => messageHistory,
+    memory: memory,
+    getMessageHistory: (_sessionId) => memory.chatHistory,
     inputMessagesKey: "question",
     historyMessagesKey: "history",
   })
 
-  const config = { configurable: { sessionId: "1" } } // 👋
+  const config = { configurable: { sessionId: "1" } }
 
   let stream = await chainWithHistory.stream({
     question: question,
-  }, config) // 👋
-
+  }, config)
+  
   reply.header('Content-Type', 'application/octet-stream')
   return reply.send(stream)
   
